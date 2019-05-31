@@ -1,0 +1,33 @@
+/************************************************************************
+
+	C. Weaver, May 2004
+	christina.weaver@mssm.edu
+
+	main_extmorph.hoc
+
+	Apply Av-Ron & Vidal channel distributions at the soma,
+	and extend to dendrites using the same ratios as used by
+	Quadroni and Knopfel.
+
+*************************************************************************************************/
+
+load_file("nrngui.hoc")
+
+load_file("modelAII.hoc")
+load_file("biophys_params.hoc")
+load_file("numerics.hoc")
+
+// MAIN
+
+xopen("error_testshapes.hoc")
+xopen("MRFdemos.ses")
+
+xopen("testshapesGUI.hoc")
+xopen("Vrun.ses")
+
+// print data to screen, and to matlab files?
+APShpFRCVFitness[0].EFUN_DBG = 1
+APShpFRCVFitness[0].VERBOSE  = 1
+
+// end MAIN
+

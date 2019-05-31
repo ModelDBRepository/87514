@@ -1,0 +1,17 @@
+ParmFitness: Unnamed multiple run protocol
+	FitnessGenerator: SpontFR: RegionFitness
+		RegionFitness:	soma.v(.5)
+
+	FitnessGenerator: SpontFR: APShpFRCVFitness
+		APShpFRCVFitness:	soma.v(.5)
+
+	Parameters:
+		"soma.gnabar_fn", 0.01, 1e-09, 0.1, 1, 1
+		"soma.gkbar_fn", 0.004, 1e-09, 0.1, 1, 1
+		"soma.gbar_kca", 0.004, 1e-09, 0.1, 1, 1
+		"Kp_cad", 0.004, 1e-09, 1, 1, 1
+		"Rca_cad", 0.004, 1e-09, 5, 1, 1
+		"soma.gbar_ka", 0.004, 1e-09, 0.1, 1, 1
+		"soma.gbar_cahi", 0.004, 1e-09, 0.1, 1, 1
+		"soma.gbar_nap", 0.004, 1e-09, 0.1, 1, 1
+End ParmFitness

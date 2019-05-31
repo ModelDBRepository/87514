@@ -1,0 +1,42 @@
+proc celldef() {
+  basic_shape()
+  subsets()
+  geom()
+  biophys()
+  geom_nseg()
+}
+
+create soma
+
+proc basic_shape() {
+  soma {pt3dclear() pt3dadd(0, 0, 0, 1) pt3dadd(15, 0, 0, 1)}
+}
+
+objref all
+objref primary_list, secondary_list
+proc subsets() { local i
+  objref all
+  all = new SectionList()
+    soma all.append()
+
+    primary_list = new SectionList()
+
+    secondary_list = new SectionList()
+
+}
+proc geom() {
+  soma {  L = 31  diam = 31  }
+}
+proc geom_nseg() {
+  soma area(.5) // make sure diam reflects 3d points
+   soma { nseg = 1  }
+}
+proc biophys() {
+	forall { 
+		Ra = 150
+		cm = 1
+	}
+}
+access soma
+
+celldef()

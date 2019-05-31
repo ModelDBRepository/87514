@@ -1,0 +1,34 @@
+/*************************************
+//Load Bill Lytton's graphing package
+strdef sfile, gfile, bfile
+sprint(sfile,"C:/NeuronSims/modelDB/LyttonGraphing/setup.hoc")
+sprint(gfile,"C:/NeuronSims/modelDB/LyttonGraphing/grvec.hoc")
+sprint(bfile,"C:/NeuronSims/modelDB/LyttonGraphing/boxes.hoc")
+print "Loading ", sfile, ", ", gfile, ", ", bfile
+
+load_file(sfile) // not needed if using emacs package SIMCTRL
+load_file(gfile) // basic routines
+load_file(bfile) // for trays
+*************************************/
+
+// prepare stimuli
+//reset_stim()
+
+// count APs
+
+objref spiketimes, isi, apc, fr, tVec, vs
+
+spiketimes = new Vector() 
+isi = new Vector()
+apc = new APCount(0.5)
+apc.record(spiketimes)
+
+objref tVec, vs
+tVec = new Vector()
+tVec.record(&t)
+vs = new Vector()
+vs.record(&soma.v(0.5))
+
+// manipulate all graphs simultaneously
+xopen("C:/NeuronSims/shared/alt_graphs.hoc")
+

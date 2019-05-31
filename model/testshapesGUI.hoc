@@ -1,0 +1,80 @@
+objref tobj 
+
+xpanel("Testing Shapes")
+        xbutton("Matched to Target", "err_dflt()")
+        xbutton("Slower FR", "err_slowFR()")
+        xbutton("Higher FR", "err_highFR()")
+        xbutton("Shallow AHP", "err_shall()")
+        xbutton("Deep AHP", "err_deep()")
+        xbutton("Burst", "err_burst()")
+        xbutton("No Spikes", "err_none()")
+xpanel(0,50)
+
+proc err_dflt() {
+	print "Default conductances; see eWin105const_dflt.m"
+     reset_testcell()
+     APShpFRCVFitness[0].outname = "eWin105const_dflt"
+     run_MRF()
+}
+
+proc err_slowFR() {
+	print "Slower FR; see eWin105const_slow.m"
+     slower_FR()
+     APShpFRCVFitness[0].outname = "eWin105const_slow"
+     run_MRF()
+}
+
+proc err_highFR() {
+	print "Higher FR; see eWin105const_high.m"
+     higher_FR()
+     APShpFRCVFitness[0].outname = "eWin105const_high"
+     run_MRF()
+}
+
+proc err_shall() {
+	print "Shallow AHP; see eWin105const_shall.m"
+     shallow_AHP()
+     APShpFRCVFitness[0].outname = "eWin105const_shall"
+     run_MRF()
+}
+
+proc err_deep() {
+	print "Deep AHP; see eWin105const_deep.m"
+     deep_singleAHP()
+     APShpFRCVFitness[0].outname = "eWin105const_deep"
+     run_MRF()
+}
+
+proc err_burst() {
+	print "Burst; see eWin105const_burst.m"
+     burst_example()
+     APShpFRCVFitness[0].outname = "eWin105const_burst"
+     run_MRF()
+}
+
+proc err_none() {
+	print "No spikes; see eWin105const_none.m"
+     no_spikes()
+     APShpFRCVFitness[0].outname = "eWin105const_none"
+     run_MRF()
+}
+
+
+proc set_MRFparams() { local i
+
+    MulRunFitter[0].p.pf.parmlist.object(0).val.x[0] = $1
+    MulRunFitter[0].p.pf.parmlist.object(1).val.x[0] = $2
+    MulRunFitter[0].p.pf.parmlist.object(2).val.x[0] = $3
+    MulRunFitter[0].p.pf.parmlist.object(3).val.x[0] = $4
+    MulRunFitter[0].p.pf.parmlist.object(4).val.x[0] = $5
+    MulRunFitter[0].p.pf.parmlist.object(5).val.x[0] = $6
+    MulRunFitter[0].p.pf.parmlist.object(6).val.x[0] = $7
+    MulRunFitter[0].p.pf.parmlist.object(7).val.x[0] = $8
+
+}
+
+proc run_MRF() {
+
+    set_MRFparams(soma.gnabar_fn,soma.gkbar_fn,soma.gbar_kca,Kp_cad,Rca_cad,soma.gbar_ka,soma.gbar_cahi,soma.gbar_nap)
+    MulRunFitter[0].p.run()
+}

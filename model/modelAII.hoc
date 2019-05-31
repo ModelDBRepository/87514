@@ -1,0 +1,117 @@
+// assume AII has Quadroni's Type B morphology
+// assign soma & dendrites anatomical properties 
+xopen("morph.hoc")
+
+CM = 1  	// uF/cm2
+RA        = 150
+
+proc define_AII() {
+
+	ctyp = 1	//Type B cell flag, for parameter assignments
+
+	// assign soma's biophysical properties, copy to dendrites 
+   	biophysics()
+
+	typeB_slow()
+
+	init()
+}
+
+proc 	biophysics() {
+
+	geom_nseg()
+
+	v0 = -52
+	v_init = v0
+	ca_init = 1e-5
+
+	forall {
+
+		// set passive params
+		Ra = RA
+		cm = CM	
+	
+		// insert channels
+		insert pas
+		insert fn
+		insert ka
+		insert kca
+		insert cahi
+		insert nap
+	
+		// insert calcium handling
+			insert cad
+			Kp_cad = 0.05
+			Rca_cad = 0.0186
+
+		// params for channel kinetics, see Av-Ron & Vidal 1999
+		vhm_fn = -33
+		am_fn = 0.055
+		an_fn = 0.055
+		vhn_fn = -35
+		lamb_fn = 0.2
+
+		vhb_ka = -70
+		ab_ka = -0.1
+		btau_ka = 10
+
+		vhx_cahi = -30
+		ax_cahi = 0.08
+		Kc_cahi = 1
+		xtau_cahi = 10
+
+		vha_ka = -40
+		aa_ka = 0.05
+
+		Kd_kca = 0.0005
+
+		vhp_nap = -56
+		ap_nap = 0.075
+		ptau_nap = 5
+
+
+		// set maximal conductances for AII 
+		gkbar_fn = 0.0026
+		g_pas = 0.0003
+		gbar_kca = 0.001316
+		gnabar_fn = 0.010
+		gbar_cahi = 0.00025
+		gbar_ka = 0
+		gbar_nap = 5e-7
+	}
+	
+
+	// reversal potentials
+	forall {
+	    e_pas = -50
+	    ena = 55
+	    ek  = -80
+	}
+
+}
+
+// apply the d_lambda rule for setting number of segments
+proc geom_nseg() {
+	soma area(0.5)	// make sure diam reflects 3d points
+	forall { nseg = int((L/(0.1*lambda_f(100))+0.9)/2)*2 + 1 }
+}
+
+proc typeB_slow() {
+
+	forall {
+		Kp_cad = 0.05
+		Rca_cad = 0.0125
+		gkbar_fn = 0.004
+		g_pas = 0.0003
+		gbar_kca = 0.001
+		gnabar_fn = 0.010
+		gbar_cahi = 0.00025
+		gbar_ka = 1e-9
+		gbar_nap = 0.00005
+	}
+	
+}
+
+define_AII()
+
+

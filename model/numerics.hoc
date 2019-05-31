@@ -1,0 +1,6 @@
+//run parameters
+tstop = 500
+steps_per_ms = 20
+dt = 0.05
+
+cvode.active(0)

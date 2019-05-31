@@ -1,0 +1,1561 @@
+/*********************************************************
+
+Implements the simplex-simulated annealing scheme for
+continuous, bounded optimization described in:
+
+Cardoso, M.F., Salcedo, R.L., Feyo de Azevedo, S.  
+The simplex-simulated annealing approach to continuous 
+non-linear optimization.  Computers chem. Engng 
+20(9): 1065-1080, (1996).
+
+Unconstrained Simulated Annealing code was written by 
+Andrew Davison (andrew.davison@unic.cnrs-gif.fr).
+
+This code was modified to implement the Cardoso algorithm 
+by Christina Weaver (Dec. 2004), christina.weaver@mssm.edu.
+
+	This implementation is described in 
+
+    Weaver, C.M. and Wearne, S.L.  The role of action potential shape 
+	and parameter constraints in optimization of compartment models.  
+	Neurocomputing 69:  1053-1057, (2006).
+
+
+*********************************************************/
+
+mulfit_optimizers_append("Constrained Sim Annealing + Recenter", "MulfitSA_Rctr", 0)
+
+begintemplate MulfitSA_Rctr
+
+public prun, sa_efun, minerr, nefun, time
+public saveflag, showopt, verbose
+public estimate_inittemp
+public alpha, beta, gamma, lambda, ftol, start_temptr, gtol
+public restart_factor, cool_rate, iter_per_step, quit_temptr
+public savepath_name, bd_pnlty, rest_inname, use_rst, get_rstname
+
+// testing wraparound BCs
+public wrapfile
+objref wrapfile
+
+objref r, simplex, old_simplex
+objref simplex_errors, new_point, best_point, mean_point, wrap_point
+objref savepath, tl, pf, verbfile, annealpath, rest_file
+objref simperrors_cpy, simplex_noise, centrd, tmp_vec
+strdef savefit_name, cmnd, savepath_name, savetmp_name, ann_str, verbname
+strdef annealfit_name
+
+objref code_low, code_high
+
+// There are two restart filenames:  one to read for initialization (when directed), 
+// and one to write.  Filenames may be different, but not necessarily!  Be careful 
+// of this.
+strdef rest_name, rest_inname
+
+//
+// N.B. cmw nov 04:
+//
+//    "eb" corresponds to the error of the "best point"
+//    "elo" is the lowest error of the simplex vertices
+//    "minerr" is the value returned to the MulRunFitter wrapper
+//
+//    in the noisy_simplex proc, comments were added as in 
+//    Numerical Recipes in C.
+
+proc init() {
+    printf("Simulated Annealing + Recenter, last updated 12 Jun 06\n")
+    pf = $o1
+
+    r = new Random()
+    r.uniform(1e-20,1)
+    savepath = new File()
+    annealpath = new File()
+    verbfile = new File()
+    rest_file = new File()
+    new_point = new Vector()
+    nefun = 0
+    st = 0
+    lambda = 2
+    ftol = 1e-5
+    quit_temptr = 1e-7
+    gtol = ftol
+    alpha = 1.0
+    beta = 2.0
+    gamma = 0.5
+
+    iter_per_step = 100
+    start_temptr = 1000
+    cool_rate = 0.9
+    restart_factor = -1
+    eb = 1e9
+    enow = 1e9
+    saveflag = 1
+    verbose = 0
+    sprint(savepath_name,"annealBD")
+    sprint(rest_inname,"annealBD.rst")
+
+    bd_pnlty = 1e5    
+
+    set_annsched(0)
+    // for 'complex' cooling schedule from A. Davison, use set_annsched(1)
+    use_NE  = 0
+    use_rst = 0
+    Kbound = Kbound_m2 = 1
+    anneal_count = 1
+}
+
+/**************************************************
+
+    Evaluate the error between model & target
+
+**************************************************/
+func sa_efun() { local e, ttime, i
+     // $3  = 1 if this is centroid/out-of-bounds, 0 otherwise
+
+    nefun += 1
+    if( verbose ) {
+        verbfile.printf("SA_EFUN    : centroid/OOB = %d\n",$3)
+        new_point.printf(verbfile)
+        verbfile.printf("vs.   sa_efun sent ")
+        for i = 0,$1-1 {
+            verbfile.printf("%-12.8g ",$&2[i])
+        }
+        verbfile.printf("\n")
+        verbfile.printf("vs. pf.pmlst point ")
+        for i = 0,pf.parmlist.count-1 {
+            verbfile.printf("%-12.8g ",pf.parmlist.object(i).val)
+        }
+        verbfile.printf("\n")
+    }
+
+    e =  pf.efun($1, &$&2)
+    if (!stoprun) {
+        if (minerr == -1 || (($3 != 1) && (e < minerr))) {
+            minerr = e
+            if (saveflag) {
+                ttime = startsw() - st
+                savepath.aopen(savefit_name)
+                lines += 1
+
+                if( verbose ) {    
+                    if( $3 == 1 ) { savepath.printf("C") }
+                    savepath.printf("EF \t") 
+                }
+
+                savepath.printf("%g %d %d %-12.8g ", temptr, nefun, ttime, minerr)
+                saveval(savepath)
+                savepath.close
+
+                if( verbose ) {
+                    verbfile.printf("WROTE    new_point ")
+                    new_point.printf(verbfile)
+                    verbfile.printf("vs.   sa_efun sent ")
+                    for i = 0,$1-1 {
+                        verbfile.printf("%-12.8g ",$&2[i])
+                    }
+                    verbfile.printf("\n")
+                    verbfile.printf("vs. pf.pmlst point ")
+                    for i = 0,pf.parmlist.count-1 {
+                        verbfile.printf("%-12.8g ",pf.parmlist.object(i).val)
+                    }
+                    verbfile.printf("\n")
+                }
+            }
+        }
+    }
+    doNotify()
+    if (verbose) {
+        verbfile.printf("%d %14.12g ",nefun, e)
+        for i = 0,$1-1 {
+            verbfile.printf("%14.12g ",$&2[i])
+        }
+        verbfile.printf("\n")
+    }
+    enow = e
+    return e
+}
+
+/****************************************************************
+    Use the data stored in savepath.rst file to initialize 
+    the simplex, and set the starting temperature.
+****************************************************************/
+func init_from_restart_file() { local i, j, rst_temp, n_par, nrow, tmpval, idx
+
+    rest_file.ropen(rest_inname)
+    rst_temp = rest_file.scanvar()
+    n_par    = rest_file.scanvar()
+    nrow     = rest_file.scanvar()
+    tmp_vec  = new Vector(n_par)
+    tl = pf.parmlist
+
+    /*** first, read which variables were optimized in the last run. ***/
+    for i = 0, n_par-1 {
+        tmp_vec.x[i] = rest_file.scanvar()
+        if( tl.object(i).doarg != tmp_vec.x[i] ) {
+            printf("Parameters optimized in restart file %s do not \
+                match those specified here.  Abort init_restart\n", \
+                rest_inname)
+            rest_file.close()
+            if( verbose ) {
+                verbfile.printf("Parameters optimized in restart file %s do not \
+                match those specified here.  Abort init_restart\n", \
+                rest_inname)
+            }
+            return 0
+        }
+    }
+    
+
+    /***  now, read the actual values of each of the simplex points.  ***/
+    for j = 0, nrow-1 {
+        idx = 0
+        for i = 0, n_par-1 {
+            tmpval = rest_file.scanvar()
+            if( ( tmp_vec.x[i] == 0 )  && ((tl.object(i).val - tmpval) > ftol) ) {
+                printf("Value of %s = %g in restart file, != current value %g\n",\
+                    tl.object(i).name,tmpval,tl.object(i).val)
+                if( verbose ) {
+                    verbfile.printf("Value of %s = %g in restart file, != current value %g\n",\
+                    tl.object(i).name,tmpval,tl.object(i).val)
+                }
+                rest_file.close()
+                return 0
+            } else {
+                if( tmp_vec.x[i] ) {
+                    simplex.x[j][idx] = code_value(tmpval,idx)
+                    idx += 1
+                }
+            }
+        }
+    }
+
+    rest_file.close()
+
+    start_temptr = rst_temp
+
+    printf("Restart file %s read; Begin at temperature %g\n",rest_inname,rst_temp)
+    printf("Simplex initialized to: \n")
+    simplex.printf
+    if( verbose ) {
+        verbfile.printf("Restart file %s read; Begin at temperature %g\n",rest_inname,rst_temp)
+        simplex.fprintf(verbfile)
+    }
+
+    return 1
+}
+
+
+/**************************************************************
+     Initialize the simplex, define best_point and mean_point,
+     and evaluate the error function at simplex points.
+**************************************************************/
+proc initialize_simplex() { local rval, inbound, abval, i,j,bdval, did_rst
+
+    abval = 0
+    for i = 0, new_point.size-1 { abval += abs(true_value(new_point.x[i],i)) }
+
+    // initialise the simplex
+    nparam = new_point.size()
+    npoints = nparam + 1
+    simplex = new Matrix(npoints,nparam)
+
+    did_rst = 0
+    if( use_rst ) {
+        // Use the data stored in savepath.rst file to initialize 
+        // the simplex, and set the starting temperature.
+
+        did_rst = init_from_restart_file() 
+
+    } 
+
+    // Either no restart was specified, or there was an error reading the
+    // restart file; initialize the simplex randomly.
+    //
+    // NOTE: cmw, jun 06:  This initialization does NOT work well when the 
+    // points are converted to log space.  Initialize the points in linear 
+    // space first, then convert them (if appropriate) to log space before 
+    // they are added to the simplex.
+    //
+    if( !use_rst || !did_rst ) {
+        for j = 0, nparam-1 {
+            if( (pf.parmlist_use.object(j).low == -1e6) || \
+                (pf.parmlist_use.object(j).high == 1e6) ) {
+                bdval = 2*abval
+            } else { 
+                bdval = Kbound*(pf.parmlist_use.object(j).high-pf.parmlist_use.object(j).low) 
+            }
+
+            for i = 0,npoints-1 {
+                inbound = 0
+                while( !inbound ) {
+                    rval = 0.5-r.repick()
+                    simplex.x[i][j] = code_value(true_value(new_point.x[j],j) + rval*bdval,j)
+
+                    if( (simplex.x[i][j] >= code_low.x[j] ) && \
+                        (simplex.x[i][j] <= code_high.x[j]) ) { 
+                        inbound = 1 
+                        if( verbose ) { 
+                            verbfile.printf("Set row %d, %s to %g\n",j, \
+                                pf.parmlist_use.object(j).name,\
+                              	true_value(simplex.x[i][j],j))
+                        }
+                    } else {
+                        if( verbose ) {
+                            verbfile.printf("Initialized row %d, %s to %g, out of range [%g, %g]\n",\
+                                j,pf.parmlist_use.object(j).name,\
+                            true_value(simplex.x[i][j],j),\
+                                pf.parmlist_use.object(j).low,pf.parmlist_use.object(j).high)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    best_point = new Vector(nparam)
+    mean_point = new Vector(nparam)
+    centrd     = new Vector(nparam)
+
+    // initialise the error vector
+    simplex_errors = new Vector(npoints)
+    for i = 0,npoints-1 {
+        if (stoprun) return
+        new_point = simplex.getrow(i)
+        if( verbose ) { 
+            verbfile.printf("INIT (OOB %d) new_point is ",out_of_bounds(new_point))
+            new_point.printf(verbfile,"%-12.8 ")
+        }
+        simplex_errors.x[i] = sa_efun(new_point.size(),&new_point.x[0],out_of_bounds(new_point))
+    }
+
+    //initialize the vector which stores the applied noise.
+    simplex_noise = new Vector(npoints,0)
+
+}
+
+
+func prun() { local lines
+
+    minerr = -1
+    restart_temptr = restart_factor * start_temptr
+    if (saveflag) {
+        sprint(savefit_name,"%s.tmp",savepath_name)
+        sprint(annealfit_name,"%s.ann",savepath_name)
+        lines = 0
+    }
+    if( verbose ) {
+        printf("Opening %s.vrb\n",savepath_name)
+        sprint(verbname,"%s.vrb",savepath_name)
+        verbfile.wopen(verbname)
+    }
+
+    // flag:  whether the simplex has 'collapsed', and the trial number at which this occurs
+    simplx_stop = -1
+    simplx_stoptrial = 0
+
+    pf.doarg_get(new_point)
+
+    set_coded_bounds()
+
+    nefun = 0
+    eb = 1e9
+    st = startsw()
+    time = st
+    if (new_point.size == 0) {
+        minerr = pf.efun(0, &time) // time is dummy here
+    } else {
+        if (stoprun) {return minerr}
+        minerr = fit_simanneal_seq()
+        new_point = best_point.c
+        if( verbose ) {
+            verbfile.printf("PRUN before sa_efun, new_point = ")
+            new_point.printf(verbfile)
+        }
+        minerr = sa_efun(new_point.size(),&new_point.x[0],out_of_bounds(new_point))
+    }
+    time = startsw() - st
+    if (saveflag) {
+        if( savepath.isopen ) { savepath.close }
+
+        // write the final temp & params to the .tmp file, then copy data over
+        // to the .fit file
+        ttime = startsw() - st
+        savepath.aopen(savefit_name)
+        savepath.printf("%g %d %d %-12.8g ", temptr, nefun, ttime, minerr)    
+        save_best_params(savepath)
+        savepath.close
+
+        sprint(savefit_name,"%s.fit",savepath_name)
+        savepath.aopen(savefit_name)
+        savepath.printf("start\n")
+
+        // First line of .fit file records the number of columns in each line of the data.
+        savepath.printf("%d %d\n", lines, pf.parmlist.count + 4)
+        savepath.close
+        sprint(cmnd,"cat %s.tmp >> %s.fit",savepath_name,savepath_name)
+        system(cmnd)
+
+        if( annealpath.isopen ) { annealpath.close }
+        sprint(annealfit_name,"%s.annfit",savepath_name)
+        annealpath.aopen(annealfit_name)
+        annealpath.printf("start\n")
+        annealpath.printf("%d %d\n", lines, pf.parmlist.count + 4)
+        annealpath.close
+        sprint(cmnd,"cat %s.ann >> %s.annfit",savepath_name,savepath_name)
+        system(cmnd)
+
+        print_info_file()
+    }
+    printf("Final temperature: %9.5g\tnefun: %d\tFinal error: %9.5g\tat point ",temptr,nefun,eb)
+    best_point.printf("%9.4g")
+
+    if( verbose ) {
+        verbfile.printf("Final temperature: %9.5g\tnefun: %d\tFinal error: %9.5g\tat point ",temptr,nefun,eb)
+        best_point.printf(verbfile)
+        verbfile.close
+    }
+
+    return minerr
+}
+
+
+proc showopt() {
+    variable_domain(&start_temptr,0,1e12)
+    variable_domain(&cool_rate,0,1)
+    variable_domain(&iter_per_step,1,1e12)
+
+    xpanel("")
+    xbutton("Estimate initial temp","estimate_inittemp()")
+    xcheckbox("Verbose output",&verbose)
+    xcheckbox("Restart from .rst file",&use_rst)
+    xvarlabel(rest_inname)
+    xbutton("Change restart filename","get_rstname(rest_inname)")
+
+    xlabel("Simplex parameters")
+    xpvalue("alpha",&alpha,1)
+    xpvalue("beta",&beta,1)
+    xpvalue("gamma",&gamma,1)
+    xpvalue("lambda",&lambda,1)
+ 
+    xlabel("Simulated annealing parameters")
+    xmenu("Select cooling schedule")
+        xbutton("Proportional decrease","set_annsched(0)")
+    xmenu()
+    xvarlabel(ann_str)
+
+    xpvalue("Cooling rate",&cool_rate,1)
+    xpvalue("Start temperature",&start_temptr,1)
+    xpvalue("Iterations per cooling step",&iter_per_step,1)
+    xpvalue("ftol",&ftol,1)
+    xpvalue("Norm grad tol",&gtol,1)
+    xpvalue("Restart factor",&restart_factor,1)
+    xpanel()
+
+    xpanel("")
+        xpvalue("Current temperature",&temptr)
+        xpvalue("Current lowest error",&elo)
+        xpvalue("Current tolerance",&rtol)
+    xpanel()
+}
+
+proc set_annsched() {
+
+    ann_sched = $1
+    if( ann_sched == 0 ) {
+        sprint(ann_str,"Proportional decrease")
+    }
+
+}
+
+func noisy_simplex() { local i, e, iter, esave, gstop
+
+    iter = $1
+
+    Ni = pf.parmlist_use.count * 5
+    Ci = Ci_avg = CiM1_avg = 0
+    m1 = m2 = delf = 0
+    nchk = Ni
+    ndone = 1
+    gstop = 0
+
+    while (1) {
+        if( verbose ) {
+            verbfile.printf("\n\nTop of loop, ")
+            print_simplex_info(verbfile)
+        }
+
+        if (stoprun) break
+
+        // find the highest (worst), next highest and lowest (best) points
+    	//
+	    // whenever we "look" at a vertex, it gets a random thermal fluctuation.
+    	// simplex_errors stores the error of the simplex points, 
+	    // plus these fluctuations.
+    	//
+	    simperrors_cpy = simplex_errors.c.sub(simplex_noise)
+    	simplex_errors = simperrors_cpy.c
+
+	    for i = 0, npoints-1 {
+
+	      // By storing the noise applied at each step, in addition to the 
+    	  // noise-amplified error, we are able to retain the actual function
+	      // values observed, which is crucial to the Press algorithm.  Otherwise
+    	  // we keep adding noise on top of itself, which is a real problem when the
+	      // noise is large!!
+    	  //
+	      if( verbose ) verbfile.printf("\tError[%d] E0 %g\t",i,simplex_errors.x[i])
+    	  simplex_noise.x[i] = -1*temptr*log(r.repick())
+	      simplex_errors.x[i] += simplex_noise.x[i]
+    	  if( verbose ) verbfile.printf("N %g\tEN %g\n",simplex_noise.x[i],simplex_errors.x[i])
+
+	    }
+
+	    ilo = simplex_errors.min_ind()    // index of smallest error (incl fluct'n)
+    	ihi = simplex_errors.max_ind()
+	    ehi = simplex_errors.x[ihi]
+    	simplex_errors.x[ihi] = -1
+	    inhi = simplex_errors.max_ind()
+    	simplex_errors.x[ihi] = ehi
+	    elo = simplex_errors.x[ilo]
+    	enhi = simplex_errors.x[inhi]
+
+	    if( verbose ) {
+    	    verbfile.printf("Worst point ")
+        	for i = 0, simplex.ncol-1 {
+            	verbfile.printf("%g ",simplex.getrow(ihi).x[i])
+	        }
+    	    verbfile.printf("E0 %g\tN %g EN %g\n",simplex_errors.x[ihi]-simplex_noise.x[ihi], \
+        	    simplex_noise.x[ihi],simplex_errors.x[ihi])
+    	}
+
+	    // 
+    	// track 'uphill' steps.
+	    // 
+    	// error values without random fluct'n
+	    ehi_det  = simperrors_cpy.x[ihi]    
+    	elo_det  = simperrors_cpy.x[ilo]
+	    enhi_det = simperrors_cpy.x[inhi]
+
+	    // test for completion
+    	rtol = 2 * abs(ehi - elo)/( abs(ehi) + abs(elo) )
+	    if (rtol < ftol || iter < 0) {
+    		break
+    	}
+
+	    // Compute vector average of all points except highest
+    	mean_point.fill(0)
+	    for i = 0, npoints-1 {
+    		if (i != ihi) mean_point.add(simplex.getrow(i))
+    	}
+	    mean_point.div(npoints-1)
+    	iter -= 2
+	    old_simplex = simplex.c()
+    	if (stoprun) break
+	    esave = ehi
+
+	    // Begin a new iteration.  First extrapolate by alpha through the face of
+    	// the simplex across from the high point, i.e. reflect the simplex from the
+	    // high point
+    	e = new_step(alpha)
+
+	    Ci += eval_centroid()
+    	ndone += 1
+	    if( ndone >= nchk ) {
+    	    gstop = estimate_normgrad()
+        	if( gstop ) {
+            	printf("Normalized gradient shows little change.  Stop annealing.\n")
+	            break
+    	    }
+	    }
+
+	    if (e < elo) {        // if lower than the lowest... N.B Press et al use <= but this seems to lead to loops
+
+	        // Gives a better result than the best point, so try an additional
+    	    // extrapolation by a factor of beta.
+
+	        if (stoprun) break
+    	    if (verbose) verbfile.printf("New best point. Try a further extrapolation.\n")
+        	e = new_step(beta)    // ...Extrapolate in the same direction
+
+	        // add Ci calculation here.
+
+	        if( verbose ) print_simplex_info(verbfile)
+    	    Ci += eval_centroid()
+        	ndone += 1
+	        if( ndone >= nchk ) {
+    	        gstop = estimate_normgrad()
+        	    if( gstop )  {
+            	    printf("Normalized gradient shows little change.  Stop annealing.\n")
+                	break
+	            }
+    	    }
+
+	        e_det = simplex_errors.x[ihi]-simplex_noise.x[ihi]
+    	    if( e_det < ehi_det ) {
+        	    m1 += 1            // increment count of successful moves
+            	if( verbose ) verbfile.printf("increment m1 %d\n",m1)
+	        } else {
+    	        m2 += 1        // increment count of unsuccessful moves
+        	    if( verbose ) {
+            	    verbfile.printf("increment m2 %d curr_delf %g - %g = %g tot_delf ",\
+                	    m2,e_det,ehi_det,e_det-ehi_det)
+	            }
+    	        delf += (e_det - ehi_det)
+        	    if( verbose ) { verbfile.printf("%g\n",delf) }
+	        }
+
+	    } else if (e >= enhi) {    // else if higher than the second-highest...
+	
+	        // The reflected point is worse than the second-highest, so look for an
+    	    // intermediate lower point, i.e. do a 1-D contraction
+        	//
+	        // Contraction is either positive or negative:  cf. 
+    	    // Wright MH.  Direct search methods:  once scorned, now respectable.
+        	// In Griffiths DF and Watson GA (eds.), Numerical Analysis 1995
+	        // (Proceedings of the 1995 Dundee Biennial Conference in Numerical
+    	    // Analysis), 191-208, Addison Wesley Longman, Harlow, U.K., 1996.
+
+	        if (stoprun) break
+    	    if (ehi < esave) {  // new point is better than the worst point;
+        	                    // do an outside (+) contraction
+	            if (verbose) verbfile.printf("Do a one dimensional contraction (+)\n")
+	            esave = ehi
+    	        e = new_step(gamma)       // ...Do a 1D positive contraction\
+
+	        } else {        // new point is worse than the worst point in
+    	                    // simplex; do an inside (-) contraction
+        	    if (verbose) verbfile.printf("Do a one dimensional contraction (-)\n")
+            	e = new_step(-1*gamma)    // ...Do a 1D negative contraction\
+	        }
+
+	        if (e >= esave) {        // if the highest point is still there...
+    	        if (verbose) verbfile.printf("Contract around the best point\n")
+
+        	    for i = 0, npoints-1 {      // ...contract about the lowest point
+            	    if (stoprun) break
+
+	                if (i != ilo) {
+    	                new_point = simplex.getrow(i).add(simplex.getrow(ilo)).mul(gamma)
+	                    simplex.setrow(i,new_point)
+    	                if( verbose ) {
+        	                verbfile.printf("E>=ESAVE, before sa_efun new_point = ")
+            	            new_point.printf(verbfile)
+                	    }
+                    	simplex_errors.x[i] = sa_efun(new_point.size(),&new_point.x[0],out_of_bounds(new_point))
+	                    simplex_noise.x[i]  = 0
+    	                if( simplex_errors.x[i] < simperrors_cpy.x[i] ) {
+        	                m1 += 1
+            	            if( verbose ) verbfile.printf("increment m1 %d\n",m1)
+                	    } else {
+                    	    m2 += 1
+                        	if( verbose ) {
+                            	verbfile.printf("increment m2 %d curr_delf %g - %g = %g tot_delf ",\
+                                	m2,simplex_errors.x[i],simperrors_cpy.x[i],\
+	                                simplex_errors.x[i] - simperrors_cpy.x[i])
+    	                    }
+        	                delf += (simplex_errors.x[i] - simperrors_cpy.x[i])
+            	            if( verbose ) { verbfile.printf("%g\n",delf) }
+                	    }
+	                }
+    	        }
+        	    //Calculate Ci here.
+            	Ci += eval_centroid()
+	            ndone += 1
+    	        if( ndone >= nchk ) {
+        	        gstop = estimate_normgrad()
+            	    if( gstop )  {
+                	    printf("Normalized gradient shows little change.  Stop annealing.\n")
+                    	break
+	                }
+    	        }
+
+	            iter -= npoints-1
+
+	        } else { 
+
+	            //Calculate Ci here.
+    	        Ci += eval_centroid()
+        	    ndone += 1
+            	if( ndone >= nchk ) {
+                	gstop = estimate_normgrad()
+	                if( gstop ) break
+    	        }
+
+	            if( e_det < ehi_det ) {
+    	            m1 += 1            // increment count of successful moves
+        	        if( verbose ) verbfile.printf("increment m1 %d\n",m1)
+            	} else {
+                	m2 += 1        // increment count of unsuccessful moves
+	                if( verbose ) {
+    	                verbfile.printf("increment m2 %d curr_delf %g - %g = %g tot_delf ",\
+        	                m2,e_det,ehi_det,e_det - ehi_det)
+            	    }
+                	delf += (e_det - ehi_det)
+	                if( verbose ) { verbfile.printf("%g\n",delf) }
+    	        }
+        	}
+
+	    } else {
+
+	        //Calculate Ci here.
+    	    Ci += eval_centroid()
+        	ndone += 1
+	        if( ndone >= nchk ) {
+    	        gstop = estimate_normgrad()
+        	    if( gstop ) break
+	        }
+       
+        	if( verbose ) verbfile.printf("Improved over the worst points.  Accepted.  \n")
+	        if( e_det < ehi_det ) {
+    	        m1 += 1            // increment count of successful moves
+        	    if( verbose ) verbfile.printf("increment m1 %d\n",m1)
+	        } else {
+    	        m2 += 1        // increment count of unsuccessful moves
+        	    if( verbose ) {
+            	    verbfile.printf("increment m2 %d curr_delf %g - %g = %g tot_delf ",\
+                	    m2,e_det,ehi_det,e_det - ehi_det)
+	            }
+    	        delf += (e_det - ehi_det)
+        	    if( verbose ) { verbfile.printf("%g\n",delf) }
+        	}
+
+	        iter += 1
+    	}
+	}
+
+	return iter
+}
+
+/*****************************************************************
+
+	Same as noisy_simplex above, except it calculates m1 and m2 
+	for initial temperature estimation.
+
+*****************************************************************/
+func noisy_simplex_m1m2() { local i, e, iter, esave
+
+	iter = $1
+
+	m1 = m2 = delf = 0
+
+	while (1) {
+    	printf("m1 %d + m2 %d = %d < %d\n",m1,m2,m1+m2,iter_per_step)
+	    verbfile.printf("m1 %d + m2 %d = %d < %d\n",m1,m2,m1+m2,iter_per_step)
+
+	    if( m1+m2 > iter_per_step ) break
+
+	    // find the highest (worst), next highest and lowest (best) points
+    	//
+	    // whenever we "look" at a vertex, it gets a random thermal fluctuation.
+    	// simplex_errors stores the error of the simplex points, 
+	    // plus these fluctuations.
+    	//
+	    simperrors_cpy = simplex_errors.c.sub(simplex_noise)
+    	simplex_errors = simperrors_cpy.c
+	    for i = 0, npoints-1 {
+
+	    	// By storing the noise applied at each step, in addition to the 
+    		// noise-amplified error, we are able to retain the actual function
+	    	// values observed, which is crucial to the Press algorithm.  Otherwise
+    		// we keep adding noise on top of itself, which is a real problem when the
+	    	// noise is large!!
+    		//
+	      	if( verbose ) {
+    	  		verbfile.printf("\tError[%d] E0 %g\t",i,simplex_errors.x[i])
+      		}
+	      	simplex_noise.x[i] = -1*temptr*log(r.repick())
+    	  	simplex_errors.x[i] += simplex_noise.x[i]
+	      	if( verbose ) {
+    	  		verbfile.printf("N %g\tEN %g\n",simplex_noise.x[i],simplex_errors.x[i])
+      		}  
+    	}
+	    ilo = simplex_errors.min_ind()    // index of smallest error (incl fluct'n)
+    	ihi = simplex_errors.max_ind()
+	    ehi = simplex_errors.x[ihi]
+    	simplex_errors.x[ihi] = -1
+	    inhi = simplex_errors.max_ind()
+    	simplex_errors.x[ihi] = ehi
+	    elo = simplex_errors.x[ilo]
+    	enhi = simplex_errors.x[inhi]
+
+	    if( verbose ) {
+	    	verbfile.printf("Worst point ")
+        	for i = 0, simplex.ncol-1 {
+		        verbfile.printf("%g ",simplex.getrow(ihi).x[i])
+    		}
+	    	verbfile.printf("E0 %g\tN %g EN %g\n",simplex_errors.x[ihi]-simplex_noise.x[ihi], \
+        	    simplex_noise.x[ihi],simplex_errors.x[ihi])
+    	}
+
+	    // 
+    	// track 'uphill' steps.
+	    // 
+    	// error values without random fluct'n
+	    ehi_det  = simperrors_cpy.x[ihi]    
+    	elo_det  = simperrors_cpy.x[ilo]
+	    enhi_det = simperrors_cpy.x[inhi]
+
+	    // test for completion
+    	rtol = 2 * abs(ehi - elo)/( abs(ehi) + abs(elo) )
+
+	    // Compute vector average of all points except highest
+    	mean_point.fill(0)
+	    for i = 0, npoints-1 {
+    		if (i != ihi) mean_point.add(simplex.getrow(i))
+	    }
+    	mean_point.div(npoints-1)
+	    iter -= 2
+    	old_simplex = simplex.c()
+	    if( m1+m2 > iter_per_step ) break
+    	esave = ehi
+
+	    // Begin a new iteration.  First extrapolate by alpha through the face of
+    	// the simplex across from the high point, i.e. reflect the simplex from the
+	    // high point
+    	e = new_step(alpha)
+	    if (e < elo) {        // if lower than the lowest... N.B Press et al use <= but this seems to lead to loops
+
+	        // Gives a better result than the best point, so try an additional
+    		// extrapolation by a factor of beta.
+		    if( m1+m2 > iter_per_step ) break
+
+	        if (verbose) verbfile.printf("New best point. Try a further extrapolation.\n")
+    	    e = new_step(beta)    // ...Extrapolate in the same direction
+
+		    if( verbose ) print_simplex_info(verbfile)
+		    e_det = simplex_errors.x[ihi]-simplex_noise.x[ihi]
+		    if( e_det < ehi_det ) {
+        		m1 += 1            // increment count of successful moves
+		        if( verbose ) verbfile.printf("increment m1 %d\n",m1)
+		    } else {
+        		m2 += 1        // increment count of unsuccessful moves
+		        if( verbose ) {
+        		    verbfile.printf("increment m2 %d curr_delf %g - %g = %g tot_delf ",\
+                		m2,e_det,ehi_det,e_det-ehi_det)
+		        }
+        		delf += (e_det - ehi_det)
+		        if( verbose ) { verbfile.printf("%g\n",delf) }
+    		}
+
+	    } else if (e >= enhi) {    // else if higher than the second-highest...
+
+	        // The reflected point is worse than the second-highest, so look for an
+		    // intermediate lower point, i.e. do a 1-D contraction
+    		//
+		    // Contraction is either positive or negative:  cf. 
+    		// Wright MH.  Direct search methods:  once scorned, now respectable.
+	    	// In Griffiths DF and Watson GA (eds.), Numerical Analysis 1995
+		    // (Proceedings of the 1995 Dundee Biennial Conference in Numerical
+    		// Analysis), 191-208, Addison Wesley Longman, Harlow, U.K., 1996.
+
+		    if( m1+m2 > iter_per_step ) break
+    		if (ehi < esave) {	// new point is better than the worst point;
+	        				    // do an outside (+) contraction
+    	        if (verbose) verbfile.printf("Do a one dimensional contraction (+)\n")
+	    	    esave = ehi
+    	    	e = new_step(gamma)       // ...Do a 1D positive contraction\
+
+	        } else {    // new point is worse than the worst point in
+    		            // simplex; do an inside (-) contraction
+	            if (verbose) verbfile.printf("Do a one dimensional contraction (-)\n")
+    	        e = new_step(-1*gamma)    // ...Do a 1D negative contraction\
+        	}
+	        if (e >= esave) {        // if the highest point is still there...
+    	        if (verbose) verbfile.printf("Contract around the best point\n")
+        	    for i = 0, npoints-1 {      // ...contract about the lowest point
+			        if( m1+m2 > iter_per_step ) break
+			        if (i != ilo) {
+			            new_point = simplex.getrow(i).add(simplex.getrow(ilo)).mul(gamma)
+			            simplex.setrow(i,new_point)
+            			if( verbose ) {
+			                verbfile.printf("M1M2: E>=ESAVE, before sa_efun new_point = ")
+            				new_point.printf(verbfile)
+			            }
+			            simplex_errors.x[i] = sa_efun(new_point.size(),&new_point.x[0],out_of_bounds(new_point))
+            			simplex_noise.x[i]  = 0
+
+			            if( simplex_errors.x[i] < simperrors_cpy.x[i] ) {
+            			    m1 += 1
+			            	if( verbose ) verbfile.printf("increment m1 %d\n",m1)
+            			} else {
+			                m2 += 1
+    	    			    if( verbose ) {
+				                verbfile.printf("increment m2 %d curr_delf %g - %g = %g tot_delf ",\
+            				        m2,simplex_errors.x[i],simperrors_cpy.x[i],\
+			    	                simplex_errors.x[i] - simperrors_cpy.x[i])
+            				}
+			            	delf += (simplex_errors.x[i] - simperrors_cpy.x[i])
+	            			if( verbose ) { verbfile.printf("%g\n",delf) }
+			            }
+        			}
+        		}
+		        iter -= npoints-1
+    	    } else { 
+    		    if( e_det < ehi_det ) {
+	        	    m1 += 1            // increment count of successful moves
+			        if( verbose ) verbfile.printf("increment m1 %d\n",m1)
+        		} else {
+            		m2 += 1        // increment count of unsuccessful moves
+		        	if( verbose ) {
+        	        	verbfile.printf("increment m2 %d curr_delf %g - %g = %g tot_delf ",\
+            	        	m2,e_det,ehi_det,e_det - ehi_det)
+			        }
+    	    	    delf += (e_det - ehi_det)
+			        if( verbose ) { verbfile.printf("%g\n",delf) }
+        		}
+    		}
+
+	    } else {
+    	    if( verbose ) verbfile.printf("Improved over the worst points.  Accepted.  \n")
+	    	if( e_det < ehi_det ) {
+    	    	m1 += 1            // increment count of successful moves
+	        	if( verbose ) verbfile.printf("increment m1 %d\n",m1)
+		    } else {
+    		    m2 += 1        // increment count of unsuccessful moves
+        		if( verbose ) {
+            		verbfile.printf("increment m2 %d curr_delf %g - %g = %g tot_delf ",\
+                		m2,e_det,ehi_det,e_det - ehi_det)
+		        }
+    		    delf += (e_det - ehi_det)
+        		if( verbose ) { verbfile.printf("%g\n",delf) }
+		    }	
+
+	        iter += 1
+    	}
+  	}
+
+  	if( m2 > 0 ) delf /= m2
+  	return iter
+}
+
+func new_step() { local e, ttime, fluc, i
+
+    new_point = mean_point.c.mul(1+$1).sub(old_simplex.getrow(ihi).mul($1))
+
+    if( out_of_bounds(new_point) ) { 
+
+        e = bd_pnlty
+
+        if( wrapfile.isopen ) { 
+            wrapfile.printf("Point was ")
+        new_point.printf(wrapfile)
+        }
+
+    // if the first attempt is out-of-bounds, recenter the 
+    // point around the best point of the simplex so far.
+    if( verbose ) {
+        verbfile.printf("Before recenter new_point = ")
+        new_point.printf(verbfile)
+    }
+
+    recenter_point()
+
+    if( verbose ) {
+        verbfile.printf("After  recenter new_point = ")
+        new_point.printf(verbfile)
+    }
+
+    } 
+
+    if( verbose ) {
+    verbfile.printf("NEW_STEP, before sa_efun new_point = ")
+        new_point.printf(verbfile)
+    }
+
+    e = sa_efun(new_point.size(),&new_point.x[0],out_of_bounds(new_point))
+
+    if( out_of_bounds(new_point) ) {
+    // if point is still out of bounds, even after recentering,
+    // penalize it.
+        e += bd_pnlty
+    }
+
+    e_det = e
+    enow = e
+
+    if (e <= eb) {    // Save the best-ever point
+
+    if( verbose ) {
+        verbfile.printf("Best point was = ")
+        best_point.printf(verbfile)
+    }
+        best_point = new_point
+    eb = e
+
+    if( verbose ) {
+        verbfile.printf("Best point NOW = ")
+        best_point.printf(verbfile)
+    }
+
+    }
+    fluc = -1*temptr*log(r.repick())
+    e -= fluc
+
+    if( verbose ) {
+    verbfile.printf("\tNew point proposed ")
+        for i = 0, simplex.ncol-1 {
+        verbfile.printf("%g ",new_point.x[i])
+    }
+    verbfile.printf("E0 %g\tN %g EN %g\n",e+fluc,fluc,e)
+    }
+
+    if (e < ehi) {
+        if (verbose) {
+
+            verbfile.printf("Replaced highest point\t")
+        if( e_det < ehi_det ) {
+            verbfile.printf("true downhill point %g (%g) replaces %g (%g)\n",e,e_det,ehi,ehi_det)
+        } else { verbfile.printf("an uphill point added to simplex %g (%g) replaces %g (%g)\n",e,e_det,ehi,ehi_det) }
+        }
+    ehi = e
+    if( verbose ) {
+        verbfile.printf("\tPoint was ")
+        simplex.getrow(ihi).printf(verbfile)
+        verbfile.printf("\tNow is    ")
+        new_point.printf(verbfile)
+    }
+    simplex.setrow(ihi,new_point)
+    simplex_errors.x[ihi] = e
+    simplex_noise.x[ihi]  = -1*fluc
+
+    if( verbose ) {
+        verbfile.printf("After replacement, ")
+        print_simplex_info(verbfile)
+    }
+    }
+    return e
+}
+
+
+proc recenter_point() { local j, abval, bdval, rval, tmplo
+
+     // Center about the best point, WITHOUT the noise.
+
+     tmplo = simplex_errors.c.sub(simplex_noise).min_ind()
+
+     if( verbose ) {
+         verbfile.printf("Recentering out-of-bounds point ")
+     for j = 0, new_point.size-1 {
+         verbfile.printf(" %g",new_point.x[j])
+     }
+     verbfile.printf("\nabout best point %d with error %g (%g) (K=%g)\n",tmplo,simplex_errors.x[tmplo]-simplex_noise.x[tmplo],simplex_errors.x[tmplo],Kbound)
+     for j = 0, new_point.size-1 {
+         verbfile.printf(" %g",simplex.getrow(tmplo).x[j])
+     }
+     verbfile.printf("\n")
+     }
+
+     for j = 0, nparam-1 {
+    if( (pf.parmlist_use.object(j).low <= -1e6) || \
+        (pf.parmlist_use.object(j).high >= 1e6) ) {
+        bdval = 2*simplex.getrow(tmplo).abs.x[j]
+        } else { 
+        bdval = Kbound*(code_high.x[j]-code_low.x[j])
+    }
+
+        rval = 0.5-r.repick()
+    new_point.x[j] = simplex.x[tmplo][j] + rval*bdval
+
+    }
+    if( verbose ) { 
+    verbfile.printf("\nNow using ")
+    for j = 0, new_point.size-1 {
+        verbfile.printf(" %g",new_point.x[j])
+    }
+    verbfile.printf("\n")
+    }
+    
+}
+
+
+proc estimate_inittemp() { local lines
+
+    minerr = -1
+    restart_temptr = restart_factor * start_temptr
+    sprint(verbname,"%s.est",savepath_name)
+    if (saveflag) {
+        sprint(savefit_name,"%s.estfit",savepath_name)
+    lines = 0
+    }
+
+    verbfile.wopen(verbname)
+
+    pf.doarg_get(new_point)
+    set_coded_bounds()
+
+    nefun = 0
+    eb = 1e9
+    st = startsw()
+    time = st
+    if (new_point.size == 0) {
+    minerr = pf.efun(0, &time) // time is dummy here
+    } else {
+    if (stoprun) {return minerr}
+
+        // Estimate the initial starting temp as in Cardoso et al. 1996
+    pf.doarg_get(new_point)
+    minerr = sa_efun(new_point.size(),&new_point.x[0],out_of_bounds(new_point))
+    start_temptr = 1e5*minerr
+    printf("Initial error %g; start temp at %g\n",minerr,start_temptr)
+    verbfile.printf("Initial error %g; start temp at %g\n",minerr,start_temptr)
+
+    verbose = 0
+    start_temptr = temp_est()
+    new_point = best_point.c
+    minerr = sa_efun(new_point.size(),&new_point.x[0],out_of_bounds(new_point))
+    }
+    time = startsw() - st
+    if( savepath.isopen ) { savepath.close }
+    best_point.printf("%9.4g")
+
+    verbfile.printf("Best point is ")
+    best_point.printf(verbfile)
+
+    verbfile.close
+}
+
+proc temp_est() { local i, id, rval
+
+    wrapfile = new File()
+
+    printf("Estimating initial temperature\n")
+    if( verbfile.isopen ) verbfile.printf("Estimating initial temperature\n")
+
+    initialize_simplex()
+
+    //Start the optimisation
+    iter = -1
+    temptr = start_temptr
+    //iter_per_step = pf.parmlist_use.count * 100
+
+    printf("Try starting temp of %g; Do %d iterations\n",start_temptr,iter_per_step)
+    if( verbfile.isopen ) { 
+    verbfile.printf("Try starting temp of %g; Do %d iterations\n",start_temptr,iter_per_step)
+    }
+
+    // Only do one iteration of the outer loop, i.e. iter_per_step function iterations
+
+    iter = iter_per_step
+    iter = noisy_simplex_m1m2(iter)
+
+    printf("\nSimplex complete.\n")
+    printf("Estimating initial temperature...\nm1 = %g\tm2 = %g\tdel F = %g\n",m1,m2,delf)
+    if( verbfile.isopen ) {
+        verbfile.printf("\nSimplex complete.\n")
+    verbfile.printf("Estimating initial temperature...\nm1 = %g\tm2 = %g\tdel F = %g\n",m1,m2,delf)
+    }
+    chitmp = 0.95
+    if( m2 > 0 ) { tmpval = (m2*chitmp - m1*(1-chitmp))/m2 } else { tmpval = 1e6 }
+    tempest = -delf / log(tmpval)
+    printf("Initial temperature estimate is %g\n",tempest)
+    printf("Ended noisy_simplex_m1m2\n")
+    if( verbfile.isopen ) {
+    verbfile.printf("Initial temperature estimate is %g\n",tempest)
+    verbfile.printf("Ended noisy_simplex_m1m2\n")
+    }
+
+}
+
+
+
+proc fit_simanneal_seq() { local i, id, rval
+
+    wrapfile = new File()
+
+    initialize_simplex()
+
+    //Start the optimisation
+    iter = -1
+    temptr = start_temptr
+    if( saveflag ) {
+    sprint(rest_name, "%s.rst",savepath_name)
+        write_restart_file()
+    }
+
+    while (iter < 0 && !stoprun && temptr > quit_temptr) {
+        iter = iter_per_step
+    iter = noisy_simplex(iter)
+    if( verbose ) {
+        verbfile.printf("Temp = %g, m1 %d m2 %d delf %g\n",temptr,m1,m2,delf)
+    }
+    if (stoprun) return
+        if( iter < 0 && simplx_stop < 0 ) {
+            simplx_stop = 1
+        simplx_stoptrial = nefun
+        simplx_temptr = temptr
+        }
+    anneal_step(ann_sched)
+    }
+    if( wrapfile.isopen ) { wrapfile.close }
+
+}
+
+
+/*****************************************************
+     Apply the annealing schedule
+*****************************************************/
+proc anneal_step() { local newTemptr, i, in_simplex, oldTemptr
+    time = startsw() - st
+
+    if (saveflag)  { 
+
+    write_restart_file()
+
+    // this is the beginning of the annealing step.  Write the current
+    // best to the savepath.fit file.
+    savepath.aopen(savefit_name)
+        lines += 1
+        if( verbose ) { savepath.printf("AS\t") } 
+    savepath.printf("%g %d %d %-12.8g ", temptr, nefun, ttime, minerr)
+    save_best_params(savepath)
+    savepath.close
+
+      // best_point doesn't give the actual *values* of the parameters being
+      // fitted; use saveval
+      //
+      // This writes the CURRENT error and parameter set, at the start of 
+      // this annealing step. 
+      annealpath.aopen(annealfit_name)
+      annealpath.printf("%g %d %d %-12.8g ", temptr, nefun, time, enow)
+      saveval(annealpath)
+      annealpath.close
+    }
+    printf("temptr=%g nefun=%d time=%d eb=%-12.8g\n", temptr, nefun, time, eb)
+
+    oldTemptr = temptr
+    if( $1 == 1 ) {     // more complex schedule
+        newTemptr = 1.0*(elo-eb)
+    if (newTemptr < temptr) {
+        if (newTemptr > 0.5*temptr) {
+            temptr = newTemptr
+        } else {
+            temptr = 0.5*temptr
+            }
+        }
+    } else {                // simplest annealing schedule
+        temptr *= cool_rate
+    }
+
+    // update Kbound, the compression parameter for bound constraints
+    anneal_count += 1
+    if( anneal_count/2 == int(anneal_count/2) ) { // an even annealing step
+        Kbound = Kbound_m2 * temptr / oldTemptr
+    if( verbose ) { 
+        printf("Updating Kbound compression, anneal step %d\n",anneal_count)
+        printf("Kbound was 1, now Kbound = %g * %g / %g = %g\n", Kbound_m2,temptr,oldTemptr,Kbound)
+        verbfile.printf("Updating Kbound compression, anneal step %d\n",anneal_count)
+        verbfile.printf("Kbound was 1, now Kbound = %g * %g / %g = %g\n", Kbound_m2,temptr,oldTemptr,Kbound)
+    }
+    } else { 
+        Kbound_m2 = Kbound
+        Kbound = 1 
+    if( verbose ) { 
+        printf("Updating Kbound compression, anneal step %d\n",anneal_count)
+        printf("Kbound was %g, now Kbound = %g\n",Kbound_m2,Kbound)
+        verbfile.printf("Updating Kbound compression, anneal step %d\n",anneal_count)
+        verbfile.printf("Kbound was %g, now Kbound = %g\n",Kbound_m2,Kbound)
+    }
+    }
+
+    if (temptr < restart_temptr) {
+        restart_temptr *= restart_factor
+    in_simplex = 0
+    for i = 0, npoints-1 {
+            in_simplex += simplex.getrow(i).eq(best_point)
+        }
+    if (in_simplex > 0) {
+            print "Best point is in simplex. No restart."
+    } else {
+            simplex.setrow(ihi,best_point)
+        printf("Restarting at temperature %g\n",temptr)
+        }
+    }
+}
+
+
+/*** 
+     The vector "best_point" only stores the parameters used in the search.  To
+     get all parameters, you must retrieve data from pf.parmlist
+***/
+proc save_best_params() { local i, use_idx
+    // $o1 is the file to write
+
+    use_idx = 0
+    tl = pf.parmlist
+printf("Writing best_point = ")
+    for i=0, tl.count-1 {
+        if( tl.object(i).doarg ) {
+        $o1.printf("%-12.8g ",true_value(best_point.x[use_idx],use_idx))
+        printf("%-12.8g ",true_value(best_point.x[use_idx],use_idx))
+        use_idx += 1
+        } else { 
+                $o1.printf("%-12.8g ", tl.object(i).val)
+                printf("%-12.8g ", tl.object(i).val)
+                //$o1.printf("%-12.8g ", tl.object(i).val.x[0])
+                //printf("%-12.8g ", tl.object(i).val.x[0])
+        }
+    }
+    $o1.printf("\n")
+    printf("\n")
+
+}
+
+
+proc saveval() { local i
+    // $o1 is the file to write
+    if (numarg() == 2) $o1.printf("%s", $s2)
+    tl = pf.parmlist
+    for i=0, tl.count-1 {
+                $o1.printf("%-12.8g ", tl.object(i).val)
+                //$o1.printf("%-12.8g ", tl.object(i).val.x[0])
+    }
+    $o1.printf("\n")
+
+}
+
+func out_of_bounds() { local i
+     for i = 0, $o1.size-1 {
+         rval = $o1.x[i]
+         if( rval < code_low.x[i] || rval > code_high.x[i] ) {
+             rval = true_value($o1.x[i],i)
+         printf("Param %s = %g (%g) out of range [%g, %g]; adjust point\n",\
+             pf.parmlist_use.object(i).name,$o1.x[i],rval,\
+             pf.parmlist_use.object(i).low,pf.parmlist_use.object(i).high)
+         if( verbose ) verbfile.printf("Param %s (%g) out of range [%g, %g]; adjust point\n",\
+             pf.parmlist_use.object(i).name,rval,\
+             pf.parmlist_use.object(i).low,pf.parmlist_use.object(i).high)
+         return 1
+     }
+     }
+    return 0
+}
+
+
+func true_value() {
+    if (pf.parmlist_use.object($2).uselog) {
+        if (pf.parmlist_use.object($2).low > 0) {
+            return exp($1)
+        }else if (pf.parmlist_use.object($2).high < 0) {
+            return exp(-$1)
+        }
+            return $1
+    }else{
+        return $1
+    }
+}
+
+func code_value() {
+    if (pf.parmlist_use.object($2).uselog) {
+        if (pf.parmlist_use.object($2).low > 0) {
+            return log($1)
+        }else if (pf.parmlist_use.object($2).high < 0) {
+            return log(-$1)
+        }
+            return $1
+    }else{
+        return $1
+    }
+}
+
+
+
+/**********************************************************
+
+    write_point2file()
+
+    writes the specified point (vector)  $o1 to the file  $o2.
+    if the point is logscale it is converted back to its 
+    true value.
+
+**********************************************************/
+proc write_point2file() { local i
+    // $o2 is the file to write
+        // $o1 is the point to write
+
+    for i=0, $o1.size-1 {
+            $o2.printf("%-12.8g ", true_value($o1.x[i],i))
+    }
+    $o2.printf("\n")
+
+}
+
+proc print_simplex_info() { local i, j
+
+     $o1.printf("Simplex info:\n")
+     for i = 0, simplex.nrow-1 {
+         $o1.printf("[%d]\t",i)
+         for j = 0, simplex.ncol-1 {
+         $o1.printf("%g ",simplex.getrow(i).x[j])
+     }
+     $o1.printf("E0 %g\tN %g\tEN %g\n",simplex_errors.x[i]-simplex_noise.x[i],\
+            simplex_noise.x[i],simplex_errors.x[i])
+     }
+}
+
+func eval_centroid() { local i, cent_err
+
+    centrd.fill(0)
+    for i = 0, npoints-1 {
+        centrd.add(simplex.getrow(i))
+    }
+    centrd.div(npoints)
+
+    if( verbose ) {
+    verbfile.printf("CNTRD, before sa_efun new_point = ")
+    centrd.printf(verbfile)
+    }
+    cent_err = sa_efun(centrd.size(),&centrd.x[0],1)
+
+    if( verbose ) {
+    verbfile.printf("At this step, centroid is (")
+        for i = 0, centrd.size-1 {
+            verbfile.printf(" %g",centrd.x[i])
+        }
+    verbfile.printf(") error %g\n",cent_err)
+    }
+
+    return cent_err
+}
+
+proc print_info_file() { local i, col
+
+    if( savepath.isopen ) savepath.close
+    sprint(savefit_name,"%s.info",savepath_name)
+    savepath.wopen(savefit_name)
+
+    savepath.printf("Sim Annealing, improved Bounded (Cardoso algorithm)\n")
+
+    savepath.printf("Initial temp was %g\n",start_temptr)
+    savepath.printf("Cooling rate was %g\n",cool_rate)
+    savepath.printf("Iterations per cooling step %d\n",iter_per_step)
+    savepath.printf("ftol = %g\n",ftol)
+    savepath.printf("gtol = %g\n",gtol)
+    savepath.printf("Simplex collapsed after %d function evaluations, temp %g\n",simplx_stoptrial,simplx_temptr)
+
+    col = 1
+    savepath.printf("Columns of file %s.fit are as follows: \n",savepath_name)
+    savepath.printf("[%d]\tCurrent temperature\n",col)
+    col += 1
+    savepath.printf("[%d]\tFunction evaluation count\n",col)
+    col += 1
+    savepath.printf("[%d]\tRun time\n",col)
+    col += 1
+    savepath.printf("[%d]\tMin Error\n",col)
+    col += 1
+    savepath.printf("\nThe remaining columns give the values of the following parameters:\n")
+
+    for i = 0, pf.parmlist.count-1 {
+        savepath.printf("[%d]\t%s\n",col,pf.parmlist.object(i).name)
+    col += 1
+    }
+
+    savepath.printf("\nThe following %d parameters were optimized:\n",pf.parmlist_use.count)
+    for i = 0, pf.parmlist_use.count-1 {
+        savepath.printf("[%d]\t%s\n",i,pf.parmlist_use.object(i).name)
+    }
+    savepath.close
+
+}
+
+func estimate_normgrad() { local gval, gsmall
+
+        //we've just passed a multiple of 5XN; recompute Ci & Ci-1
+    CiM1_avg = Ci_avg
+    Ci_avg = Ci / Ni
+    gval = (Ci_avg-CiM1_avg)/(Ci_avg*Ni)
+    if( gval < gtol ) { gsmall = 1 } else { gsmall = 0 }
+
+        printf("\tNormalized gradient %g < %g\n",gval,gtol)
+
+    if( verbose ) {
+        verbfile.printf("...Testing normalized gradient:  ")
+         verbfile.printf("Iteration %d, multiple of %d\n",ndone,Ni)
+        verbfile.printf("Ci = %g, CiM1 = %g, grad ~ %g...",\
+                        Ci_avg,CiM1_avg,(Ci_avg-CiM1_avg)/(Ci_avg*Ni))
+        if( !gsmall ) verbfile.printf("Gradient test failed (%g)",ftol)
+        verbfile.printf("\n")
+    }
+    nchk += Ni
+
+    return 0    // at the moment, we want to stop only when temperature is small enough.
+    //return gsmall
+}
+
+proc write_restart_file() { local i, j, use_idx
+    // write current simplex to restart file
+    
+    printf("Writing output file %s\n",rest_name)
+    tl = pf.parmlist
+    rest_file.wopen(rest_name)
+    rest_file.printf("%g %d %d\n",temptr,tl.count,simplex.nrow)
+
+    for i = 0, tl.count-1 {
+    if( tl.object(i).doarg ) {
+        rest_file.printf("1 ")
+    } else { rest_file.printf("0 ") }
+    }
+    rest_file.printf("\n")
+
+    for j = 0, simplex.nrow-1 {
+    use_idx = 0
+    for i=0, tl.count-1 {
+        if( tl.object(i).doarg ) {
+        rest_file.printf("%-12.8g ",true_value(simplex.getrow(j).x[use_idx],use_idx))
+        use_idx += 1
+        } else { 
+                rest_file.printf("%-12.8g ", tl.object(i).val)
+        }
+    }
+    rest_file.printf("\n")
+    }
+
+    rest_file.close
+}
+
+proc get_rstname() {
+    string_dialog("Enter restart filename",$s1)
+}
+
+/************************************************************
+
+    set_coded_bounds()
+
+    Often throughout the search we need to check how a point 
+    compares to its bounds.  The user may have specified that 
+    a log transform of the data is desired, complicating this 
+    comparison.  Rather than (possibly) applying a log transform 
+    to the bounds each time such a check is done, set up the
+    transformed bounds up front.
+
+************************************************************/
+proc set_coded_bounds() { local i
+
+    code_low  = new Vector()
+    code_high = new Vector()
+
+    for i = 0, pf.parmlist_use.count-1 {
+        code_low.append( code_value(pf.parmlist_use.object(i).low, i))
+        code_high.append(code_value(pf.parmlist_use.object(i).high,i))
+    }
+
+    if( verbose ) {
+    verbfile.printf("Lower bounds were : ")
+    for i = 0, pf.parmlist_use.count-1 {
+            verbfile.printf("%g ",pf.parmlist_use.object(i).low)
+        }
+        verbfile.printf("\nTransformed to : ")
+        code_low.printf(verbfile)
+
+    verbfile.printf("Upper bounds were : ")
+    for i = 0, pf.parmlist_use.count-1 {
+            verbfile.printf("%g ",pf.parmlist_use.object(i).high)
+        }
+        verbfile.printf("\nTransformed to : ")
+        code_high.printf(verbfile)
+
+
+    }
+
+}
+
+endtemplate MulfitSA_Rctr

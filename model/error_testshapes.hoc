@@ -1,0 +1,135 @@
+proc reset_testcell() {
+	biophysics()
+	typeB_slow()
+	ca_init = 1e-4
+	cainf_cad = 1e-4
+	v_init = -52
+	ek = -80
+}
+
+proc 	deep_singleAHP() {
+
+	reset_testcell()
+
+	gnabar_fn = 0.018
+	gbar_ka   = 0.0071
+	gbar_cahi = 0.001
+	gbar_nap  = 1e-9
+	Kp_cad = 1
+	Rca_cad = 5
+
+}
+
+proc single_spike() {
+	reset_testcell()
+	Kp_cad  = 0.025
+	Rca_cad = 0.00625
+}
+
+proc slower_FR() {
+	reset_testcell()
+	Kp_cad  = 0.0325
+	Rca_cad = 0.008125
+}
+
+proc higher_FR() {
+	reset_testcell()
+	Kp_cad  = 0.1
+	Rca_cad = 0.025
+}
+
+proc shallow_AHP() {
+	reset_testcell()
+	gnabar_fn = 0.02
+}
+
+proc no_spikes() {
+	reset_testcell()
+	gbar_kca *= 2
+}
+
+proc burst_example() {
+        reset_testcell()
+	gnabar_fn = 0.01
+	gkbar_fn = 0.004
+	//kca, cahi different from default
+	gbar_kca = 0.00025
+	gbar_cahi = 0.001
+	gbar_ka = 1e-9
+	gbar_nap = 5e-5
+	Kp_cad = 0.05
+	Rca_cad = 0.0125
+
+}
+
+
+
+/*** Av-Ron's Minimal Cell Model ***/
+proc setMCM() {
+
+	gbar_nap = 0
+	gbar_cahi = 0
+	gbar_kca = 0
+	gbar_ka = 1e-9
+
+	v_init = -56
+
+	gkbar_fn = 0.010
+	vhm_fn = -31
+	am_fn = 0.065
+	vhn_fn = -46
+	an_fn = 0.055
+	lamb_fn = 0.08
+	gnabar_fn = 0.120
+	g_pas = 0.0003
+	ena = 55
+	ek = -72
+	e_pas = -50
+
+}
+
+proc setburst() {
+
+	setMCM() 
+
+	simp_cahi = 1
+	gkbar_fn = 0.005
+	gbar_kca = 0.0005
+	Kd_kca = 0.0005
+	gbar_cahi = 0.0002
+	
+	ek = -72
+	eca = 124
+	vrest_cahi = 124
+
+	Kp_cad = 0.0005
+	Rca_cad = 0.003
+	cainf_cad = 1e-5
+	
+	vhx_cahi = -40
+	ax_cahi = 0.2
+	xtau_cahi = 50
+
+	simp_cahi=0
+}
+
+proc adapting() {
+	reset_testcell()
+	Kp_cad  = 0.04
+	Rca_cad = 0.0005
+	gbar_kca = .0003
+}
+
+proc burst_cond() {
+        reset_testcell()
+	gbar_nap = 0
+	gbar_ka = 1e-9
+	gnabar_fn = 0.1
+	gkbar_fn = 0.005
+	gbar_kca = 0.0005
+	gbar_cahi = 0.0002
+	
+	Kp_cad = 0.05
+	Rca_cad = 0.03
+	cainf_cad = 1e-5
+}
